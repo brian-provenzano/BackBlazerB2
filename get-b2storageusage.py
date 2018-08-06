@@ -58,7 +58,11 @@ def Main():
 
     try:
         #personal module BackBlazeB2 usage
-        b2 = BackBlazeB2(accountId,applicationKey)
+        b2 = BackBlazeB2(accountId,applicationKey,args.debug)
+
+        #deleteMeBucket = b2.Buckets.Get("laptop-T470")
+        #print(deleteMeBucket.Delete())
+
         if b2.IsAuthorized:
             buckets = b2.Buckets.All()
             if len(buckets) > 0:

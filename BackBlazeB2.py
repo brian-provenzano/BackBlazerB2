@@ -15,11 +15,12 @@ import requests
 #import base64
 import os
 import json
+import time
 from enum import Enum
 
 class BackBlazeB2(object):
 
-    def __init__(self,accountId=None,applicationKey=None):
+    def __init__(self,accountId=None,applicationKey=None,debug=False):
         #look for env variables if they exist
         if accountId is None or applicationKey is None:
             accountId = os.environ.get('B2_ACCOUNTID', None)
@@ -32,7 +33,8 @@ class BackBlazeB2(object):
 
         self.accountId = accountId
         self.applicationKey = applicationKey
-        self.connection = Connection(accountId,applicationKey)
+        self.connection = Connection(accountId,applicationKey,debug)
+        self.debug = debug
 
 
     def IsAuthorized(self):
@@ -51,19 +53,42 @@ class B2Bucket(object):
     A Backblaze B2 bucket
     '''
 
-    def __init__(self, recId, name, b2type, revision, size=0, sizeHumanReadable=""):
-        self.recId = recId
+    def __init__(self, connection, bucketId, name, b2type, revision, size=0, sizeHumanReadable=""):
+        self.bucketId = bucketId
+        self.connection = connection
         self.name = name
         self.b2type = b2type
         self.revision = revision
         self.size = size
         self.sizeHumanReadable = sizeHumanReadable
 
-    def Delete(self,bucketId):
+
+    def Delete(self):
         '''
         delete the specified b2 bucket
         '''
-        pass
+        print("deleting bucket :{0}".format(self.bucketId))
+        #TODO - delete from our local bucket cache (Buckets )
+        try:
+            headers = { 'Authorization' : self.connection.authorizationToken }
+            body = json.dumps({ 'bucketId' : self.bucketId, 'accountId' : self.connection.accountId })
+            response = requests.post("{0}/b2api/v1/b2_delete_bucket".format(self.connection.apiUrl), data=body, headers=headers)
+            response.raise_for_status()
+            jsonResult = response.json()
+            if response.status_code == 200:
+                Message.Show(MessageType.INFO, "Bucket [{0}] deleted".format(self.bucketId))
+
+                if self.connection.debug:
+                    print(jsonResult)
+            elif response.status_code == 400:
+                 Message.Show(MessageType.ERROR, jsonResult)
+            else:
+                Message.Show(MessageType.ERROR,
+                        "Server did not return status 200 - returned [{0}] ".format(response.status_code))
+
+        #throw the base request ex so we can continue on any error from requests module
+        except requests.exceptions.RequestException as re:
+            Message.Show(MessageType.ERROR, "Trying to delete b2 bucket", re)
 
 
 class B2Buckets(object):
@@ -130,13 +155,20 @@ class B2Buckets(object):
         for key in self._bucketIds.keys():
             try:
                 headers = { 'Authorization' : self.connection.authorizationToken }
-                body = json.dumps({ 'bucketId' : key })
+                body = json.dumps({ 'bucketId' : key, 'maxFileCount' : 999 })
                 response = requests.post("{0}/b2api/v1/b2_list_file_names".format(self.connection.apiUrl), data=body, headers=headers)
                 response.raise_for_status()
                 if response.status_code == 200:
                     jsonResult = response.json()
+                    filesTotal = 0
                     for count,item in enumerate(jsonResult["files"], start=0):
                         bucketsBytesTotal += item["contentLength"]
+                        if self.connection.debug:
+                            print("{0} - {1} [{2}]".format(item["fileName"],item["contentLength"],self.__SizeHumanReadable(item["contentLength"])))
+                            filesTotal += count
+                    if self.connection.debug:
+                        print("---------\n{0}\n---------".format(jsonResult))
+                        print("number of files: {0}".format(filesTotal))
                 else:
                     Message.Show(MessageType.ERROR,
                             "Server did not return status 200 - returned [{0}] ".format(response.status_code))
@@ -144,6 +176,9 @@ class B2Buckets(object):
             #throw the base request ex so we can continue on any error from requests module
             except requests.exceptions.RequestException as re:
                 Message.Show(MessageType.ERROR, "Trying to list files at b2", re)
+
+            if self.connection.debug:
+                print("DEBUG: Bytes total : {0}".format(bucketsBytesTotal))
 
             self.__bucketsBytesTotal = bucketsBytesTotal
             (self._bucketIds[key]).size = bucketsBytesTotal
@@ -161,11 +196,13 @@ class B2Buckets(object):
             response.raise_for_status()
             if response.status_code == 200:
                 jsonResult = response.json()
+                if self.connection.debug:
+                    print(jsonResult)
                 self.buckets.clear()
                 self._bucketIds.clear()
                 self._bucketNames.clear()
-                for count,item in enumerate(jsonResult["buckets"], start=0):
-                    bucket = B2Bucket(item["bucketId"], item["bucketName"], item["bucketType"], item["revision"])
+                for item in jsonResult["buckets"]:
+                    bucket = B2Bucket(self.connection, item["bucketId"], item["bucketName"], item["bucketType"], item["revision"])
                     self.buckets.append(bucket)
                     self._bucketNames[item["bucketName"]] = bucket
                     self._bucketIds[item["bucketId"]] = bucket
@@ -212,9 +249,10 @@ class Connection(object):
     __isAuthorized = False
     b2AuthUrl = "https://api.backblazeb2.com/b2api/v1/b2_authorize_account"
    
-    def __init__(self,accountId,applicationKey):
+    def __init__(self,accountId,applicationKey,debug):
         self.accountId = accountId
         self.applicationKey = applicationKey
+        self.debug = debug
         self.__AuthorizeAccount()
     
     def IsAuthorized(self):
@@ -235,6 +273,8 @@ class Connection(object):
             response.raise_for_status()
             if response.status_code == 200:
                 jsonResult = response.json()
+                if self.debug:
+                    print(jsonResult)
                 self.authorizationToken = jsonResult["authorizationToken"]
                 self.apiUrl = jsonResult["apiUrl"]
                 self.downloadUrl = jsonResult["downloadUrl"]
@@ -314,3 +354,30 @@ class style:
     DIM       = '\033[2m'
     NORMAL    = '\033[22m'
     RESET_ALL = '\033[0m'
+
+
+def TimeFromFloat(f):
+    return time.strftime("%H:%M:%S", time.gmtime(f))
+
+
+class SimpleTimer(object):
+    """ simple timer for util purposes """
+    import time
+    startTime = 0.0
+    StopTime = 0.0
+    elapsed = 0.0
+
+    def __init__(self):
+        self.startTime = time.time()
+
+    def Stop(self):
+        self.StopTime = time.time()
+
+    def GetElapsed(self):
+        self.StopTime = time.time()
+        self.elapsed = (self.StopTime - self.startTime)
+        return self.elapsed
+
+    def PrintSummary(self, doingWhat="do something"):
+        return "[ {0} ] Time elapsed {1}".format(TimeFromFloat(self.elapsed),doingWhat)
+
